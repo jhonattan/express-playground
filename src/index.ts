@@ -1,52 +1,119 @@
-import express, { RequestHandler, ErrorRequestHandler } from "express";
+import express from "express";
+import cookieParser from "cookie-parser";
+import bcrypt from "bcrypt";
+import session from "express-session";
+import connect from "connect-pg-simple";
 import { pool } from "./db";
-//import { nextTick } from "process";
+import { createUser, getUser, getUserByEmail } from "./data/user-data";
 
 const app = express();
-const port = 3000;
+const port = 5500;
 
-const handler1: RequestHandler = (_req, _res, next) => {
-  console.log("Primer handler");
-  next("route");
-};
+declare module "express-session" {
+  interface SessionData {
+    userId: string;
+  }
+}
 
-const handler2: RequestHandler = (_req, _res, next) => {
-  console.log("Segundo handler");
-  next();
-};
+const pgSession = connect(session);
 
-const handler3: RequestHandler = (_req, res) => {
-  console.log("Tercer handler");
-  res.send("Finaliza el ciclo solicitud-respuesta");
-};
+const sessionMiddleware = session({
+  store: new pgSession({
+    pool: pool,
+  }),
+  secret: "session-secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, maxAge: 10000 },
+});
 
-app.get("/users", async (_req, res, next) => {
-  try {
-    const result = await pool.query("SELECT id FROM users limit 1;");
-    res.status(201).json(result.rows);
-  } catch (err) {
-    next(err);
+app.use(cookieParser()); // Poblar req.cookies con objetos de cookies
+app.use(express.json()); // Transformar req.body a JSON
 
-    // console.error(err);
-    // res.status(500).json({ message: "Error fetching users" });
+// Arreglo de usuarios en memoria:
+// El id será un string ya que usaremos 'crypto.randomUUID()' para generarlo
+//const users: { id: string; email: string; password: string }[] = [];
+
+app.post("/signup", async (req, res) => {
+  const { email, password } = req.body;
+
+  //const user = users.find((u) => u.email === email);
+  const user = await getUserByEmail(email);
+
+  if (user) {
+    res.status(400).send("El correo ya está registrado");
+    return;
+  }
+
+  const costFactor = 10; // Cost factor
+  const hashedPassword = await bcrypt.hash(password, costFactor);
+
+  // const newUser = {
+  //   id: crypto.randomUUID(),
+  //   email,
+  //   password: hashedPassword,
+  // };
+
+  //users.push(newUser);
+
+  const newUser = await createUser(email, hashedPassword);
+
+  res.status(201).json(newUser);
+});
+
+app.post("/login", sessionMiddleware, async (req, res) => {
+  const { email, password } = req.body;
+  //const user = users.find((u) => u.email === email);
+
+  const user = await getUserByEmail(email);
+
+  if (!user) {
+    res.status(401).send("Credenciales incorrectas");
+    return;
+  }
+
+  const isValid = await bcrypt.compare(password, user.password);
+  if (isValid) {
+    // Guardamos el id del usuario en la sesión
+    req.session.userId = user.id;
+    res.send("Login exitoso");
+  } else {
+    res.status(401).send("Credenciales incorrectas");
   }
 });
 
-app.get("/", handler1, handler2);
-app.get("/", handler3);
+app.get("/user", sessionMiddleware, async (req, res) => {
+  // leemos el id del usuario desde la sesión
+  const userId = req.session.userId;
 
-app.get("/error", (_req, _res, next) => {
-  const error = new Error("This is a test error!");
-  next(error); // Pass error to error handler
+  //const user = users.find((u) => u.id === userId);
+
+  if (!userId) {
+    res.status(403).send("Acceso denegado");
+    return;
+  }
+
+  const user = await getUser(Number(userId));
+
+  if (user) {
+    res.json(user);
+  } else {
+    res.status(403).send("Acceso denegado");
+  }
 });
 
-const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
-  console.error(err.stack);
-  res.status(500).send("Algo salio mal");
-};
-
-app.use(errorHandler);
-
-app.listen(port, () => {
-  console.log(`Servidor corriendo en http://localhost:${port}`);
+app.post("/logout", sessionMiddleware, (req, res) => {
+  // Borramos la sesión del lado del servidor
+  req.session.destroy((error) => {
+    if (error) {
+      console.log(error);
+      res.status(500).send("Error al cerrar sesión");
+      return;
+    }
+    // Opcionalmente, borramos la sesión del lado del cliente también
+    res.clearCookie("connect.sid");
+    res.send("Logout exitoso");
+  });
 });
+
+app.listen(port, () => console.log(`Escuchando al puerto ${port}`));
