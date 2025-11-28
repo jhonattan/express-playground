@@ -7,6 +7,16 @@ import jwt from "jsonwebtoken";
 import { pool } from "./db";
 import { createUser, getUser, getUserByEmail } from "./data/user-data";
 
+class ApiError extends Error {
+  statusCode: number;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode;
+    this.name = "ApiError";
+  }
+}
+
 const app = express();
 const port = 5500;
 
@@ -14,6 +24,7 @@ declare global {
   namespace Express {
     interface Request {
       userId?: number;
+      roleId?: string;
     }
   }
 }
@@ -26,33 +37,42 @@ declare module "express-session" {
 
 const jwtSecret = "ultra-secret";
 
-export function authenticateHandler(
-  req: Request,
-  _res: Response,
-  next: NextFunction
-) {
-  // if (!token) {
-  //   return next(new ApiError("No autorizado", 401));
-  // }
+export function authenticateHandler(requiredRole?: string) {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    // if (!token) {
+    //   return next(new ApiError("No autorizado", 401));
+    // }
 
-  try {
-    const token = req.headers.authorization?.split(" ")[1];
+    try {
+      const token = req.headers.authorization?.split(" ")[1];
 
-    if (!token) {
+      if (!token) {
+        return;
+      }
+
+      const payload = jwt.verify(token, jwtSecret) as {
+        userId: number;
+        roleId: string;
+        iat: number;
+        exp: number;
+      }; // { userId: 5, iat: 1704896639, exp: 1704896699 }
+
+      req.userId = payload.userId;
+      req.roleId = payload.roleId;
+
+      console.log("Role ID:", req.roleId);
+      console.log("Required Role:", requiredRole);
+      console.log("User ID:", req.userId);
+
+      if (requiredRole?.includes(req.roleId)) {
+        return next();
+      } else {
+        next(new ApiError("No autorizado", 401));
+      }
+    } catch (error) {
       return;
     }
-
-    const payload = jwt.verify(token, jwtSecret) as {
-      userId: number;
-      iat: number;
-      exp: number;
-    }; // { userId: 5, iat: 1704896639, exp: 1704896699 }
-
-    req.userId = payload.userId;
-    next();
-  } catch (error) {
-    return;
-  }
+  };
 }
 
 const pgSession = connect(session);
@@ -75,7 +95,7 @@ app.use(express.json()); // Transformar req.body a JSON
 //const users: { id: string; email: string; password: string }[] = [];
 
 app.post("/signup", async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, role } = req.body;
 
   //const user = users.find((u) => u.email === email);
   const user = await getUserByEmail(email);
@@ -96,7 +116,7 @@ app.post("/signup", async (req, res) => {
 
   //users.push(newUser);
 
-  const newUser = await createUser(email, hashedPassword);
+  const newUser = await createUser(email, hashedPassword, role);
 
   res.status(201).json(newUser);
 });
@@ -114,7 +134,7 @@ app.post("/login", sessionMiddleware, async (req, res) => {
 
   const isValid = await bcrypt.compare(password, user.password);
   if (isValid) {
-    const payload = { userId: user.id };
+    const payload = { userId: user.id, roleId: user.role };
     const token = jwt.sign(payload, jwtSecret, { expiresIn: "1m" });
 
     res.json({ ok: true, message: "Login exitoso", data: { token } });
@@ -190,7 +210,7 @@ app.post("/logout", sessionMiddleware, (req, res) => {
   });
 });
 
-app.get("/user2", authenticateHandler, async (req, res) => {
+app.get("/user2", authenticateHandler("admin"), async (req, res) => {
   const user = await getUser(Number(req.userId));
   if (user) {
     res.json(user);
